@@ -4,21 +4,13 @@ config PMW3370
     bool "Enable PMW3370 sensor support"
     default y
     help
-      Enables a PixArt PMW3370 driver that talks over SPI. This driver
-      is a PMW33xx-family driver scaffold. It currently provides SPI
-      probing and a Zephyr sensor API. You will likely need to add a
-      SROM upload step (binary SROM file) and tune registers for full
-      functionality.
-
-if PMW3370
+      Enables a PixArt PMW3370 driver for Zephyr/ZMK.
 
 config PMW3370_POLL_MS
-    int "Polling interval (ms) for sensor read"
+    int "Polling interval (ms) when IRQ isn't used"
     default 4
     help
-      How often the driver polls the sensor for motion samples (ms).
-
-endif # PMW3370
+      Fallback polling interval.
 
 endmenu
 
