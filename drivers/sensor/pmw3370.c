@@ -1,10 +1,11 @@
-/* Minimal PMW3370 Zephyr driver for ZMK use (sensor API).
- * - SPI mode 3
- * - Uses MT IRQ (active low) to read motion
- * - Exposes dx/dy via SENSOR_CHAN_ACCEL_X / SENSOR_CHAN_ACCEL_Y (as integer val1)
+/* pmw3370.c - PMW3370 Zephyr sensor driver (modern DT APIs)
  *
- * NOTE: This is intended to be used with ZMK behavior_sensor_move / rotate.
- *       Put the SROM or additional tuning into the TODO areas if needed.
+ * - Uses SPI controller at nodelabel "spi0" and the child node "pmw3370@0"
+ * - Reads motion via IRQ (irq-gpios) and exposes dx/dy via sensor API
+ * - SPI mode 3, up to spi-max-frequency on the child node (default 2 MHz)
+ *
+ * NOTE: The overlay MUST define a nodelabel "pmw3370" for the PMW3370 child:
+ *   pmw3370: pmw3370@0 { compatible = "pixart,pmw3370"; reg = <0>; spi-max-frequency = <2000000>; irq-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>; ... };
  */
 
 #include <zephyr/kernel.h>
@@ -16,99 +17,88 @@
 #include <zephyr/logging/log.h>
 #include "pmw3370.h"
 
-LOG_MODULE_REGISTER(pmw3370, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(pmw3370, LOG_LEVEL_DBG);
 
 struct pmw3370_data {
-    const struct device *spi;
+    const struct device *spi_dev;
     struct spi_config spi_cfg;
-    const struct device *irq_gpio;
-    gpio_pin_t irq_pin;
     struct gpio_callback irq_cb;
+    struct gpio_dt_spec irq_spec;
     int16_t last_dx;
     int16_t last_dy;
+    const struct device *dev;
     struct k_mutex lock;
 };
 
+/* Helper to write a register: write op = 0x80 | reg, then value */
 static int pmw3370_write_reg(const struct device *dev, uint8_t reg, uint8_t val)
 {
     struct pmw3370_data *d = dev->data;
-    uint8_t tx[2] = { (uint8_t)(0x80 | reg), val }; /* write: set MSB */
+    uint8_t tx[2] = { (uint8_t)(0x80U | reg), val };
     const struct spi_buf tx_buf = { .buf = tx, .len = 2 };
     const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
 
-    return spi_write(d->spi, &d->spi_cfg, &tx_set);
+    return spi_write(d->spi_dev, &d->spi_cfg, &tx_set);
 }
 
+/* Helper to read a register:
+ * Some PixArt parts require sending address byte and then reading.
+ * We send the address (reg & 0x7F) and read back 2 bytes; the data is in byte 1.
+ */
 static int pmw3370_read_reg(const struct device *dev, uint8_t reg, uint8_t *out)
 {
     struct pmw3370_data *d = dev->data;
-    uint8_t addr = reg & 0x7F;
-    uint8_t rx[2] = {0, 0};
+    uint8_t addr = reg & 0x7FU;
+    uint8_t rx[2] = { 0, 0 };
     const struct spi_buf tx_buf = { .buf = &addr, .len = 1 };
     const struct spi_buf rx_buf = { .buf = rx, .len = 2 };
     const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
     const struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
 
-    /* Many PixArt parts require a small delay between address and reading data.
-     * We use spi_transceive and then extract the returned byte (rx[1]).
-     */
-    int rc = spi_transceive(d->spi, &d->spi_cfg, &tx_set, &rx_set);
+    int rc = spi_transceive(d->spi_dev, &d->spi_cfg, &tx_set, &rx_set);
     if (rc == 0) {
         *out = rx[1];
     }
     return rc;
 }
 
-/* Burst motion read: read delta X and delta Y (16-bit 2's complement) */
+/* Read Delta X/Y registers (0x03..0x06) as 16-bit signed (two's complement) */
 static int pmw3370_read_motion(const struct device *dev, int16_t *dx, int16_t *dy)
 {
-    struct pmw3370_data *d = dev->data;
-    /* We'll read registers 0x03..0x06 (Delta X L/H, Delta Y L/H).
-     * To be safe we will read them individually with small delays.
-     */
     uint8_t xl, xh, yl, yh;
     int rc;
 
     rc = pmw3370_read_reg(dev, PMW_REG_DELTA_X_L, &xl);
     if (rc) return rc;
-    k_msleep(1);
+    k_busy_wait(50);
     rc = pmw3370_read_reg(dev, PMW_REG_DELTA_X_H, &xh);
     if (rc) return rc;
-    k_msleep(1);
+    k_busy_wait(50);
     rc = pmw3370_read_reg(dev, PMW_REG_DELTA_Y_L, &yl);
     if (rc) return rc;
-    k_msleep(1);
+    k_busy_wait(50);
     rc = pmw3370_read_reg(dev, PMW_REG_DELTA_Y_H, &yh);
     if (rc) return rc;
 
-    int16_t rawx = (int16_t)((xh << 8) | xl);
-    int16_t rawy = (int16_t)((yh << 8) | yl);
+    *dx = (int16_t)((xh << 8) | xl);
+    *dy = (int16_t)((yh << 8) | yl);
 
-    *dx = rawx;
-    *dy = rawy;
     return 0;
 }
 
-/* Power-up initialization sequence based on supplied datasheet steps.
- * We implement the register writes in order (the datasheet gave many writes).
- * If SROM upload is required, place it into this function (TODO).
+/* Minimal power-up-init based on datasheet sequence. This implements the
+ * concrete register writes provided earlier. If additional steps are required,
+ * extend this function.
  */
 static int pmw3370_powerup_init(const struct device *dev)
 {
-    /* This follows the "Power-Up Initialization Register Setting" sequence you provided.
-     * Not all steps are enumerated here (some steps in your list omitted register numbers),
-     * but we implement the core writes that are present and safe.
-     *
-     * If any register values are missing in the sequence you pasted, the driver will
-     * still try the essential writes and continue. You can add or tune more reg writes later.
-     */
-
-    /* 1 */ pmw3370_write_reg(dev, 0x7F, 0x12);
-    /* 2 */ pmw3370_write_reg(dev, 0x47, 0x00);
-    /* 3 */ pmw3370_write_reg(dev, 0x7F, 0x00);
-    /* 4 */ pmw3370_write_reg(dev, 0x18, 0x00);
-    /* 5 */ pmw3370_write_reg(dev, 0x40, 0x80);
-    pmw3370_write_reg(dev, 0x55, 0x00);
+    /* A subset of the long initialization sequence; expand as needed. */
+    pmw3370_write_reg(dev, 0x7F, 0x12);
+    pmw3370_write_reg(dev, 0x47, 0x00);
+    pmw3370_write_reg(dev, 0x7F, 0x00);
+    pmw3370_write_reg(dev, 0x18, 0x00);
+    pmw3370_write_reg(dev, 0x40, 0x80);
+    /* ... other register writes from the sequence ... */
     pmw3370_write_reg(dev, 0x4D, 0x50);
     pmw3370_write_reg(dev, 0x4E, 0x3B);
     pmw3370_write_reg(dev, 0x4F, 0x46);
@@ -133,7 +123,7 @@ static int pmw3370_powerup_init(const struct device *dev)
     pmw3370_write_reg(dev, 0x40, 0x03);
     pmw3370_write_reg(dev, 0x4C, 0x28);
     pmw3370_write_reg(dev, 0x49, 0x00);
-    pmw3370_write_reg(dev, 0x4F, 0x02); /* example from sequence */
+    pmw3370_write_reg(dev, 0x4F, 0x02);
     pmw3370_write_reg(dev, 0x53, 0x0C);
     pmw3370_write_reg(dev, 0x4A, 0x67);
     pmw3370_write_reg(dev, 0x6D, 0x20);
@@ -172,14 +162,12 @@ static int pmw3370_powerup_init(const struct device *dev)
     pmw3370_write_reg(dev, 0x6E, 0x00);
     pmw3370_write_reg(dev, 0x73, 0x83);
     pmw3370_write_reg(dev, 0x74, 0x00);
-    /* finalization */
     pmw3370_write_reg(dev, 0x7F, 0x00);
     pmw3370_write_reg(dev, 0x5B, 0x40);
     pmw3370_write_reg(dev, 0x61, 0xAD);
     pmw3370_write_reg(dev, 0x51, 0xEA);
     pmw3370_write_reg(dev, 0x19, 0x9F);
 
-    /* wait for chip ready: read 0x20 until value 0x0F or up to 100ms */
     for (int i = 0; i < 100; i++) {
         uint8_t v = 0;
         if (pmw3370_read_reg(dev, 0x20, &v) == 0 && v == 0x0F) {
@@ -189,15 +177,19 @@ static int pmw3370_powerup_init(const struct device *dev)
     }
 
     LOG_WRN("pmw3370 init: chip didn't report ready (0x20 != 0x0F)");
-    return 0; /* continue anyway */
+    return 0;
 }
 
-static void pmw3370_irq_handler(const struct device *gpio_dev, struct gpio_callback *cb, uint32_t pins)
+/* IRQ handler - the gpio callback passes us the gpio callback struct,
+ * we get the driver data and read motion from the chip.
+ */
+static void pmw3370_irq_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
 {
+    ARG_UNUSED(port);
     struct pmw3370_data *d = CONTAINER_OF(cb, struct pmw3370_data, irq_cb);
     int16_t dx = 0, dy = 0;
 
-    if (pmw3370_read_motion(gpio_dev->config, &dx, &dy) == 0) {
+    if (pmw3370_read_motion(d->dev, &dx, &dy) == 0) {
         k_mutex_lock(&d->lock, K_NO_WAIT);
         d->last_dx = dx;
         d->last_dy = dy;
@@ -208,7 +200,7 @@ static void pmw3370_irq_handler(const struct device *gpio_dev, struct gpio_callb
     }
 }
 
-/* sensor API */
+/* sensor API: fetch called by ZMK to sample values */
 static int pmw3370_sample_fetch(const struct device *dev, enum sensor_channel chan)
 {
     struct pmw3370_data *d = dev->data;
@@ -252,39 +244,46 @@ static int pmw3370_init(const struct device *dev)
 {
     struct pmw3370_data *d = dev->data;
 
-    d->spi = device_get_binding(DT_LABEL(DT_NODELABEL(spi0)));
-    if (!d->spi) {
-        LOG_ERR("pmw3370: SPI device not found");
+    d->dev = dev;
+
+    /* Get SPI device by node label (spi0) */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+    if (!device_is_ready(spi_dev)) {
+        LOG_ERR("pmw3370: spi0 device not ready");
         return -ENODEV;
     }
+    d->spi_dev = spi_dev;
 
-    /* SPI config: mode 3, 8-bit words, up to 8MHz */
+    /* Configure spi_config */
     d->spi_cfg.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA;
-    d->spi_cfg.frequency = 2000000u; /* start at 2MHz; overlay may adjust */
-    d->spi_cfg.slave = 0; /* overlay 'reg' should match */
+    /* Pull slave index from child node 'reg' property (pmw3370@0 reg = <0>) */
+    d->spi_cfg.slave = DT_REG_ADDR(DT_NODELABEL(pmw3370));
+    /* Pull frequency from child node property spi-max-frequency (fallback 2000000) */
+    d->spi_cfg.frequency = DT_PROP_OR(DT_NODELABEL(pmw3370), spi_max_frequency, 2000000);
 
     k_mutex_init(&d->lock);
     d->last_dx = 0;
     d->last_dy = 0;
 
-    /* Initialize pins: setup irq gpio if available via label gpio0 and configured pin */
-    d->irq_gpio = device_get_binding(DT_LABEL(DT_NODELABEL(gpio0)));
-    if (d->irq_gpio) {
-        d->irq_pin = 6; /* user told me MT=6; if overlay sets different pin, adjust here */
-        gpio_pin_configure(d->irq_gpio, d->irq_pin, GPIO_INPUT | GPIO_PULL_UP);
-        gpio_init_callback(&d->irq_cb, pmw3370_irq_handler, BIT(d->irq_pin));
-        gpio_add_callback(d->irq_gpio, &d->irq_cb);
-        gpio_pin_interrupt_configure(d->irq_gpio, d->irq_pin, GPIO_INT_EDGE_TO_ACTIVE);
-        LOG_INF("pmw3370: irq on gpio0 pin %d", d->irq_pin);
+    /* Setup IRQ gpio from the pmw3370 child node's irq-gpios */
+    d->irq_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(pmw3370), irq_gpios);
+    if (device_is_ready(d->irq_spec.port)) {
+        int rc = gpio_pin_configure_dt(&d->irq_spec, GPIO_INPUT | GPIO_PULL_UP);
+        if (rc) {
+            LOG_WRN("pmw3370: failed to configure irq pin (%d)", rc);
+        } else {
+            gpio_init_callback(&d->irq_cb, pmw3370_irq_handler, BIT(d->irq_spec.pin));
+            gpio_add_callback(d->irq_spec.port, &d->irq_cb);
+            gpio_pin_interrupt_configure_dt(&d->irq_spec, GPIO_INT_EDGE_TO_ACTIVE);
+            LOG_INF("pmw3370: irq configured on %s pin %d", d->irq_spec.port->name, d->irq_spec.pin);
+        }
     } else {
-        LOG_WRN("pmw3370: irq gpio not found; driver will poll");
+        LOG_WRN("pmw3370: irq gpio not ready - will poll instead");
     }
 
-    /* Power-up reset */
+    /* Power-up reset & initialization */
     pmw3370_write_reg(dev, PMW_REG_POWER_UP_RESET, 0x00);
     k_msleep(5);
-
-    /* Power-up initialization sequence */
     pmw3370_powerup_init(dev);
 
     /* Probe product id */
