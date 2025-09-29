@@ -1,0 +1,4 @@
+build:
+  cmake: drivers/sensor
+  kconfig: drivers/sensor/Kconfig
+

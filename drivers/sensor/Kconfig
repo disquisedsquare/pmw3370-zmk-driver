@@ -1,8 +1,5 @@
-menu "PMW3370 optical sensor driver"
-
-config PMW3370
+menuconfig PMW3370
     bool "Enable PMW3370 sensor support"
-    default y
     help
       Enables a PixArt PMW3370 driver for Zephyr/ZMK.
 
@@ -11,6 +8,4 @@ config PMW3370_POLL_MS
     default 4
     help
       Fallback polling interval.
-
-endmenu
 
