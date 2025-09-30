@@ -13,7 +13,7 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
-#include "../../../include/pmw3370.h"
+#include "../../include/pmw3370.h"
 
 LOG_MODULE_REGISTER(pmw3370, CONFIG_SENSOR_LOG_LEVEL);
 
