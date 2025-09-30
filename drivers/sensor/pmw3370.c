@@ -6,7 +6,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zmk/behavior.h>
-#include <zmk/sensor.h>
+#include <zmk/sensors.h>
 
 LOG_MODULE_REGISTER(pmw3370, LOG_LEVEL_INF);
 
