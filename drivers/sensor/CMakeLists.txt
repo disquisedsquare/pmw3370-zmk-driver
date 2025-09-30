@@ -7,5 +7,10 @@ zephyr_include_directories(include)
 zephyr_include_directories($ENV{ZEPHYR_BASE}/../zmk/app/include)
 zephyr_include_directories($ENV{ZEPHYR_BASE}/../zmk/app/drivers)
 
+# ZMK headers pulled by west
+zephyr_library_include_directories($ENV{ZEPHYR_BASE}/../zmk/app/include)
+zephyr_library_include_directories($ENV{ZEPHYR_BASE}/../zmk/app/drivers)
+
+
 
 
