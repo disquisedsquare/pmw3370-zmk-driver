@@ -1,24 +1,26 @@
-title: PixArt PMW3370
+# SPDX-License-Identifier: Apache-2.0
+title: PixArt PMW3370 optical sensor
 description: Device tree binding for PixArt PMW3370 optical sensor.
+
+compatible: "pixart,pmw3370"
+
+include: [spi-device.yaml]
+
 properties:
-  compatible:
-    const: pixart,pmw3370
-  reg:
-    description: SPI chip select index
-    type: array
-    items:
-      - type: integer
-  spi-max-frequency:
-    type: integer
   irq-gpios:
-    type: array
-    items:
-      - $ref: /schemas/gpio.yaml
+    type: phandle-array
+    required: true
+    description: Interrupt pin from the motion sensor.
+
   evt-type:
-    type: integer
+    type: int
+    description: Event type for input transform
+
   x-input-code:
-    type: integer
+    type: int
+    description: Input code for X axis
+
   y-input-code:
-    type: integer
-required: ["compatible", "reg", "spi-max-frequency"]
+    type: int
+    description: Input code for Y axis
 
