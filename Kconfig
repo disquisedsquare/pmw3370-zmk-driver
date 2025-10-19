@@ -1,0 +1,16 @@
+config PMW3370
+	bool "Enable PMW3370 optical sensor driver"
+	depends on SPI && INPUT
+	help
+	  Enable support for the PixArt PMW3370 optical sensor for trackballs/pointing devices.
+
+if PMW3370
+
+config PMW3370_CPI
+	int "Default CPI for PMW3370"
+	default 1600
+	range 100 19000
+	help
+	  Default counts per inch (CPI) resolution for the sensor.
+
+endif

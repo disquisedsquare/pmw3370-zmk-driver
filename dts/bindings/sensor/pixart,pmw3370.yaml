@@ -1,26 +1,26 @@
-# SPDX-License-Identifier: Apache-2.0
-title: PixArt PMW3370 optical sensor
-description: Device tree binding for PixArt PMW3370 optical sensor.
-
 compatible: "pixart,pmw3370"
 
-include: [spi-device.yaml]
+description: PixArt PMW3370 optical mouse sensor
+
+include: spi-device.yaml
 
 properties:
   irq-gpios:
     type: phandle-array
     required: true
-    description: Interrupt pin from the motion sensor.
+    description: Motion interrupt GPIO pin
 
-  evt-type:
+  scroll-layers:
+    type: int-array
+    required: false
+    description: Layers where motion is interpreted as scrolling
+
+  snipe-layers:
+    type: int-array
+    required: false
+    description: Layers where precision (snipe) mode is enabled
+
+  automouse-layer:
     type: int
-    description: Event type for input transform
-
-  x-input-code:
-    type: int
-    description: Input code for X axis
-
-  y-input-code:
-    type: int
-    description: Input code for Y axis
-
+    required: false
+    description: Layer to auto-activate on motion
